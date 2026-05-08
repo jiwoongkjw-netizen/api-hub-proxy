@@ -1,0 +1,17 @@
+{
+  "name": "api-hub-proxy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "api-hub의 Cloudflare↔Cloudflare 라우팅 차단 우회용 프록시. 비-Cloudflare 호스트(Render)에서 동작. 현재 V World 전용",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "fastify": "^5.2.1"
+  }
+}

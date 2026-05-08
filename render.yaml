@@ -1,0 +1,21 @@
+# Render Blueprint — 무료 web service로 자동 셋업.
+# 배포 절차: render.com → New → Blueprint → 이 GitHub repo 선택 → Apply.
+# PROXY_TOKEN은 dashboard에서 직접 입력 (sync: false로 표시됨).
+
+services:
+  - type: web
+    name: api-hub-proxy
+    runtime: node
+    plan: free
+    region: singapore
+    branch: main
+    buildCommand: npm ci
+    startCommand: node src/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      - key: PROXY_TOKEN
+        sync: false
+      - key: VWORLD_REFERER
+        value: "https://sedamtax.kr/"

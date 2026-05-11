@@ -49,6 +49,7 @@ app.get("/vworld/:service", async (req, reply) => {
   const target = `${VWORLD_BASE}/${service}${qs ? "?" + qs : ""}`;
 
   let upstream;
+  const t0 = Date.now();
   try {
     upstream = await fetch(target, {
       method: "GET",
@@ -59,15 +60,29 @@ app.get("/vworld/:service", async (req, reply) => {
       },
     });
   } catch (err) {
-    req.log.error({ err: err.message }, "vworld fetch failed");
+    req.log.error({ err: err.message, target }, "vworld fetch threw");
     reply.code(502);
     return { ok: false, error: `upstream fetch error: ${err.message}` };
   }
 
-  // 응답 패스스루 — 본문 buffer로 받아 그대로 전달 (이미지 포함)
   const buf = Buffer.from(await upstream.arrayBuffer());
+  const elapsed = Date.now() - t0;
+  const ct = upstream.headers.get("content-type") || "";
+  const cfRay = upstream.headers.get("cf-ray") || "";
+  const cfStatus = upstream.headers.get("cf-cache-status") || "";
+  const server = upstream.headers.get("server") || "";
+  // 디버그: 상태/헤더/본문 앞부분 로그
+  req.log.info({
+    target,
+    status: upstream.status,
+    elapsed,
+    contentType: ct,
+    cfRay,
+    cfStatus,
+    server,
+    bodyPrefix: buf.toString("utf8", 0, Math.min(400, buf.length)),
+  }, "vworld response");
   reply.code(upstream.status);
-  const ct = upstream.headers.get("content-type");
   if (ct) reply.header("content-type", ct);
   return buf;
 });

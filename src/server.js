@@ -60,9 +60,22 @@ app.get("/vworld/:service", async (req, reply) => {
       },
     });
   } catch (err) {
-    req.log.error({ err: err.message, target }, "vworld fetch threw");
+    const cause = err.cause;
+    req.log.error({
+      err: err.message,
+      errName: err.name,
+      causeCode: cause?.code,
+      causeMessage: cause?.message,
+      causeErrno: cause?.errno,
+      causeSyscall: cause?.syscall,
+      target,
+    }, "vworld fetch threw");
     reply.code(502);
-    return { ok: false, error: `upstream fetch error: ${err.message}` };
+    return {
+      ok: false,
+      error: `upstream fetch error: ${err.message}`,
+      cause: cause ? { code: cause.code, message: cause.message } : undefined,
+    };
   }
 
   const buf = Buffer.from(await upstream.arrayBuffer());

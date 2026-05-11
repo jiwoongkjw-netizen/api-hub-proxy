@@ -1,49 +1,56 @@
-# api-hub-proxy
+# api-hub-proxy (Vercel)
 
 api-hub 워커가 직접 호출 못 하는 외부 API를 우회하는 비-Cloudflare 프록시. 현재 **V World 전용**.
 
-## 왜 필요한가
+## 왜 Vercel인가
 
-`api.vworld.kr`는 Cloudflare 뒤에 있는데, Cloudflare Workers → Cloudflare 호스트 라우팅에서 502/520이 발생한다. PowerShell 직접 호출, 일반 서버에서의 호출은 정상 — Workers 출구만 막힘. 이 프록시는 Render(비-Cloudflare 인프라)에서 돌면서 일반 인터넷 경로로 V World에 접근한다.
+`api.vworld.kr`는 Cloudflare 뒤에 있는데:
+- Cloudflare Workers → V World: CF↔CF 라우팅에서 502/520 (V World 측 차단)
+- Render Singapore → V World: outbound IP 차단으로 502 (V World 측 차단)
+- **Vercel (AWS Lambda 기반) → V World**: outbound IP가 광범위·분산이라 차단 회피
 
-## 배포 (Render)
+## 구조
+
+```
+api/
+  health.js              GET /api/health           헬스체크 (인증 없음)
+  vworld/[service].js    GET /api/vworld/<svc>?... V World 패스스루
+                         <svc> ∈ address|search|data|image|identify
+                         헤더: Authorization: Bearer <PROXY_TOKEN>
+vercel.json              Vercel 빌드 설정 (Serverless Functions 자동 감지)
+package.json             dependencies 없음, Node 20
+```
+
+## 배포 (Vercel)
 
 1. **GitHub에 push** (이미 되어 있다면 skip)
-2. https://render.com → New → **Blueprint** → 이 repo 선택 → Apply
-3. 환경변수 입력:
-   - `PROXY_TOKEN` — 임의 강한 문자열. **api-hub 워커의 `VWORLD_PROXY_TOKEN` secret과 동일하게 박아야 함**
-   - `VWORLD_REFERER` (기본 `https://sedamtax.kr/`) — V World 마이페이지 등록 도메인
-4. 배포 완료 후 URL 받음 (예: `https://api-hub-proxy.onrender.com`)
-
-## API
-
-```
-GET /health
-→ { "ok": true, "name": "api-hub-proxy" }
-
-GET /vworld/<service>?<query>
-Authorization: Bearer <PROXY_TOKEN>
-→ V World 응답 패스스루 (status·content-type 보존)
-```
-
-`<service>` ∈ `address | search | data | image | identify`
+2. https://vercel.com → **Sign in with GitHub** → **Add New → Project**
+3. `api-hub-proxy` repo 선택 → **Import**
+4. Framework Preset: **Other**, Root Directory: 기본값
+5. **Environment Variables** 추가:
+   - `PROXY_TOKEN` — api-hub의 `VWORLD_PROXY_TOKEN`과 동일하게 박을 강한 문자열
+   - `VWORLD_REFERER` (선택, 기본 `https://sedamtax.kr/`)
+6. **Deploy** 클릭 → 1분 후 URL 받음 (예: `https://api-hub-proxy.vercel.app` 또는 `https://api-hub-proxy-<해시>-<팀>.vercel.app`)
 
 ## api-hub와 연결
 
-api-hub 측에 두 개의 secret 추가:
+api-hub 측 secret 갱신:
 
-```bash
-# C:\dev\api-hub
-echo '{"VWORLD_PROXY_BASE":"https://api-hub-proxy.onrender.com","VWORLD_PROXY_TOKEN":"<위와_동일_토큰>"}' \
-  | Set-Content -Encoding utf8 .secrets-tmp.json
+```powershell
+# Vercel 배포 URL을 받은 다음
+$payload = @{
+  VWORLD_PROXY_BASE = "https://<vercel-url>"
+  VWORLD_PROXY_TOKEN = "<위 PROXY_TOKEN과 동일>"
+} | ConvertTo-Json -Compress
+[System.IO.File]::WriteAllText("C:\dev\api-hub\.secrets-tmp.json", $payload, [System.Text.UTF8Encoding]::new($false))
 npx wrangler secret bulk .secrets-tmp.json
 Remove-Item .secrets-tmp.json
 ```
 
-api-hub의 `src/routes/vworld.ts`가 이 두 시크릿을 보고 자동으로 프록시 경유로 호출.
+api-hub의 `src/routes/vworld.ts`가 두 secret을 보고 자동으로 프록시 경유로 호출. proxy URL 패턴은 `${VWORLD_PROXY_BASE}/api/vworld/<service>?<query>`.
 
 ## 한계
 
-- Render free tier는 15분 idle 후 sleep — 첫 호출 cold start 5-15초
-- 트래픽이 항상 발생하면 자동으로 깨어있음. 초기 검증 후 cron으로 1분마다 `/health` 핑하면 깨움 유지 가능 (UptimeRobot 등 외부 모니터링 활용)
-- 무료 플랜은 월 750시간 (한 service 24h × 31일 ≈ 744h) 안에서 무제한
+- Vercel 무료(Hobby) plan: 함수 실행 100GB-Hours/월. V World 호출 같은 경량 트래픽엔 충분
+- Cold start: ~300ms. 빈번 호출 시 warm 유지
+- 함수 실행 시간 한도: 10초 (Hobby) / 60초 (Pro). V World 응답은 보통 0.2~1초라 안전

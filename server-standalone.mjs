@@ -1,0 +1,104 @@
+// api-hub-proxy — standalone Node http server (의존성 0).
+//
+// 용도: 한국 IDC VM(예: Oracle Cloud 춘천 Always Free)에서 상시 실행.
+//   V World가 비-한국 클라우드(Cloudflare/Render Singapore/Vercel AWS Lambda) outbound IP를
+//   광범위 차단하므로, 한국 IP에서 호출하면 통과될 가능성. 이 서버가 그 한국 IP 출구.
+//
+// 환경변수:
+//   PROXY_TOKEN     (필수) — api-hub의 VWORLD_PROXY_TOKEN secret과 동일하게
+//   VWORLD_REFERER  (선택) — V World 등록 도메인. 기본 https://sedamtax.kr/
+//   PORT            (선택) — 기본 8080
+//
+// 라우팅:
+//   GET /health                        → {"ok":true}
+//   GET /vworld/<service>?<query>       → V World 패스스루 (Authorization: Bearer <PROXY_TOKEN>)
+//                                         service ∈ address|search|data|image|identify
+//
+// 실행:  PROXY_TOKEN=xxx node server-standalone.mjs
+// systemd 등록 권장 (재부팅 시 자동 시작).
+
+import { createServer } from "node:http";
+import { URL } from "node:url";
+
+const PROXY_TOKEN = process.env.PROXY_TOKEN;
+if (!PROXY_TOKEN) {
+  console.error("FATAL: PROXY_TOKEN env var required");
+  process.exit(1);
+}
+const VWORLD_BASE = "https://api.vworld.kr/req";
+const VWORLD_REFERER = process.env.VWORLD_REFERER || "https://sedamtax.kr/";
+const PORT = parseInt(process.env.PORT || "8080", 10);
+const ALLOWED = new Set(["address", "search", "data", "image", "identify"]);
+
+function send(res, status, obj, contentType) {
+  res.statusCode = status;
+  if (Buffer.isBuffer(obj)) {
+    if (contentType) res.setHeader("content-type", contentType);
+    res.end(obj);
+  } else {
+    res.setHeader("content-type", "application/json; charset=utf-8");
+    res.end(JSON.stringify(obj));
+  }
+}
+
+const server = createServer(async (req, res) => {
+  let parsedUrl;
+  try {
+    parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
+  } catch {
+    return send(res, 400, { ok: false, error: "bad url" });
+  }
+  const path = parsedUrl.pathname;
+
+  if (path === "/health") {
+    return send(res, 200, { ok: true, name: "api-hub-proxy", platform: "standalone" });
+  }
+
+  const m = path.match(/^\/vworld\/([a-z]+)$/);
+  if (!m) return send(res, 404, { ok: false, error: "not found" });
+
+  if (req.method !== "GET") return send(res, 405, { ok: false, error: "GET only" });
+  const auth = req.headers["authorization"] || "";
+  if (auth !== `Bearer ${PROXY_TOKEN}`) return send(res, 401, { ok: false, error: "unauthorized" });
+
+  const service = m[1];
+  if (!ALLOWED.has(service)) return send(res, 404, { ok: false, error: `unknown service: ${service}` });
+
+  const qs = (req.url.split("?")[1]) || "";
+  const target = `${VWORLD_BASE}/${service}${qs ? "?" + qs : ""}`;
+
+  let upstream;
+  const t0 = Date.now();
+  try {
+    upstream = await fetch(target, {
+      method: "GET",
+      headers: {
+        accept: "application/json,*/*",
+        "user-agent": "Mozilla/5.0 (compatible; api-hub-proxy/1.0)",
+        referer: VWORLD_REFERER,
+      },
+    });
+  } catch (err) {
+    const cause = err.cause;
+    console.error(JSON.stringify({
+      tag: "vworld-fetch-threw", err: err.message, errName: err.name,
+      causeCode: cause?.code, causeMessage: cause?.message, target,
+    }));
+    return send(res, 502, {
+      ok: false, error: `upstream fetch error: ${err.message}`,
+      cause: cause ? { code: cause.code, message: cause.message } : undefined,
+    });
+  }
+  const buf = Buffer.from(await upstream.arrayBuffer());
+  const ct = upstream.headers.get("content-type") || "";
+  console.log(JSON.stringify({
+    tag: "vworld-response", status: upstream.status, elapsed: Date.now() - t0,
+    contentType: ct, cfRay: upstream.headers.get("cf-ray") || "",
+    bodyPrefix: buf.toString("utf8", 0, Math.min(200, buf.length)),
+  }));
+  send(res, upstream.status, buf, ct || undefined);
+});
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`api-hub-proxy (standalone) listening on 0.0.0.0:${PORT}`);
+});

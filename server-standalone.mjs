@@ -9,10 +9,15 @@
 //   VWORLD_REFERER  (선택) — V World 등록 도메인. 기본 https://sedamtax.kr/
 //   PORT            (선택) — 기본 8080
 //
-// 라우팅:
+// 라우팅 (모두 Authorization: Bearer <PROXY_TOKEN> 필요, /health 제외):
 //   GET /health                        → {"ok":true}
-//   GET /vworld/<service>?<query>       → V World 패스스루 (Authorization: Bearer <PROXY_TOKEN>)
+//   GET /vworld/<service>?<query>       → https://api.vworld.kr/req/<service>?<query>
 //                                         service ∈ address|search|data|image|identify
+//   GET /ned/<op>?<query>              → https://api.vworld.kr/ned/data/<op>?<query>
+//                                         (개별공시지가 getIndividualLandPriceAttr 등 NED 연계 API)
+//   GET /law/<sub>?<query>            → https://law.go.kr/DRF/<lawSearch|lawService>.do?<query>
+//                                         sub: search → lawSearch.do, service → lawService.do
+//                                         (법제처 API도 동일 TLS 525 문제 — 같은 한국 IDC 경유)
 //
 // 실행:  PROXY_TOKEN=xxx node server-standalone.mjs
 // systemd 등록 권장 (재부팅 시 자동 시작).
@@ -26,9 +31,12 @@ if (!PROXY_TOKEN) {
   process.exit(1);
 }
 const VWORLD_BASE = "https://api.vworld.kr/req";
+const VWORLD_NED_BASE = "https://api.vworld.kr/ned/data";
+const LAW_BASE = "https://law.go.kr/DRF";
 const VWORLD_REFERER = process.env.VWORLD_REFERER || "https://sedamtax.kr/";
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const ALLOWED = new Set(["address", "search", "data", "image", "identify"]);
+const LAW_SUBS = { search: "lawSearch.do", service: "lawService.do" };
 
 function send(res, status, obj, contentType) {
   res.statusCode = status;
@@ -54,30 +62,44 @@ const server = createServer(async (req, res) => {
     return send(res, 200, { ok: true, name: "api-hub-proxy", platform: "standalone" });
   }
 
-  const m = path.match(/^\/vworld\/([a-z]+)$/);
-  if (!m) return send(res, 404, { ok: false, error: "not found" });
+  // 라우트 결정
+  let target = null;
+  let withReferer = false;
+  const mVw = path.match(/^\/vworld\/([a-z]+)$/);
+  const mNed = path.match(/^\/ned\/([A-Za-z0-9_]+)$/);
+  const mLaw = path.match(/^\/law\/([a-z]+)$/);
+  const qs = (req.url.split("?")[1]) || "";
 
   if (req.method !== "GET") return send(res, 405, { ok: false, error: "GET only" });
   const auth = req.headers["authorization"] || "";
   if (auth !== `Bearer ${PROXY_TOKEN}`) return send(res, 401, { ok: false, error: "unauthorized" });
 
-  const service = m[1];
-  if (!ALLOWED.has(service)) return send(res, 404, { ok: false, error: `unknown service: ${service}` });
-
-  const qs = (req.url.split("?")[1]) || "";
-  const target = `${VWORLD_BASE}/${service}${qs ? "?" + qs : ""}`;
+  if (mVw) {
+    const service = mVw[1];
+    if (!ALLOWED.has(service)) return send(res, 404, { ok: false, error: `unknown vworld service: ${service}` });
+    target = `${VWORLD_BASE}/${service}${qs ? "?" + qs : ""}`;
+    withReferer = true;
+  } else if (mNed) {
+    target = `${VWORLD_NED_BASE}/${mNed[1]}${qs ? "?" + qs : ""}`;
+    withReferer = true;
+  } else if (mLaw) {
+    const sub = LAW_SUBS[mLaw[1]];
+    if (!sub) return send(res, 404, { ok: false, error: `unknown law sub: ${mLaw[1]} (search|service)` });
+    target = `${LAW_BASE}/${sub}${qs ? "?" + qs : ""}`;
+    withReferer = false;
+  } else {
+    return send(res, 404, { ok: false, error: "not found" });
+  }
 
   let upstream;
   const t0 = Date.now();
   try {
-    upstream = await fetch(target, {
-      method: "GET",
-      headers: {
-        accept: "application/json,*/*",
-        "user-agent": "Mozilla/5.0 (compatible; api-hub-proxy/1.0)",
-        referer: VWORLD_REFERER,
-      },
-    });
+    const headers = {
+      accept: "application/json,text/xml,*/*",
+      "user-agent": "Mozilla/5.0 (compatible; api-hub-proxy/1.0)",
+    };
+    if (withReferer) headers.referer = VWORLD_REFERER;
+    upstream = await fetch(target, { method: "GET", headers });
   } catch (err) {
     const cause = err.cause;
     console.error(JSON.stringify({
